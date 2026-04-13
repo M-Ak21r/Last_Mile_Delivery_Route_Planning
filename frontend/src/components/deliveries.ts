@@ -213,11 +213,11 @@ function openDeliveryForm(delivery?: Delivery): void {
     <div class="form-row">
       <div class="form-group">
         <label class="form-label">Latitude *</label>
-        <input class="form-input" id="f-lat" type="number" step="0.0001" value="${delivery?.coordinates.lat || ''}" placeholder="28.6139">
+        <input class="form-input" id="f-lat" type="number" step="0.0001" value="${delivery?.location.coordinates[1] || ''}" placeholder="28.6139">
       </div>
       <div class="form-group">
         <label class="form-label">Longitude *</label>
-        <input class="form-input" id="f-lng" type="number" step="0.0001" value="${delivery?.coordinates.lng || ''}" placeholder="77.2090">
+        <input class="form-input" id="f-lng" type="number" step="0.0001" value="${delivery?.location.coordinates[0] || ''}" placeholder="77.2090">
       </div>
     </div>
     <div class="form-row">
@@ -241,7 +241,7 @@ function openDeliveryForm(delivery?: Delivery): void {
       <div class="form-group">
         <label class="form-label">Status</label>
         <select class="form-select" id="f-status">
-          ${(['pending','assigned','picked_up','in_transit','delivered','failed','returned'] as DeliveryStatus[]).map(s =>
+          ${(['PENDING_DISPATCH','ROUTE_OPTIMIZED','IN_TRANSIT','DELIVERED','FAILED_ATTEMPT'] as DeliveryStatus[]).map(s =>
             `<option value="${s}" ${delivery?.status === s ? 'selected' : ''}>${s.replace('_',' ')}</option>`).join('')}
         </select>
       </div>
@@ -274,9 +274,12 @@ function openDeliveryForm(delivery?: Delivery): void {
       customerName:    (document.getElementById('f-name') as HTMLInputElement).value,
       customerPhone:   (document.getElementById('f-phone') as HTMLInputElement).value,
       address:         (document.getElementById('f-address') as HTMLInputElement).value,
-      coordinates: {
-        lat: parseFloat((document.getElementById('f-lat') as HTMLInputElement).value),
-        lng: parseFloat((document.getElementById('f-lng') as HTMLInputElement).value),
+      location: {
+        type: 'Point' as const,
+        coordinates: [
+          parseFloat((document.getElementById('f-lng') as HTMLInputElement).value),
+          parseFloat((document.getElementById('f-lat') as HTMLInputElement).value),
+        ] as [number, number],
       },
       weightKg:        parseFloat((document.getElementById('f-weight') as HTMLInputElement).value),
       codAmount:       parseFloat((document.getElementById('f-cod') as HTMLInputElement).value) || 0,

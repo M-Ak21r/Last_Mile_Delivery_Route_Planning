@@ -13,6 +13,7 @@ import {
   createDriver,
   updateDriver,
   deleteDriver,
+  updateDriverLocation,
 } from '../controllers/driverController';
 import {
   getAllRoutes,
@@ -28,6 +29,11 @@ const router = Router();
 // Dashboard
 router.get('/dashboard', getDashboardStats);
 
+// Config — exposes the Mapbox public token to the frontend
+router.get('/config', (_req, res) => {
+  res.json({ mapboxToken: process.env.MAPBOX_ACCESS_TOKEN ?? '' });
+});
+
 // Deliveries
 router.get('/deliveries', getAllDeliveries);
 router.get('/deliveries/stats', getDeliveryStats);
@@ -42,6 +48,8 @@ router.get('/drivers/:id', getDriver);
 router.post('/drivers', createDriver);
 router.put('/drivers/:id', updateDriver);
 router.delete('/drivers/:id', deleteDriver);
+// Real-time GPS telemetry — called by driver mobile app / simulator
+router.put('/drivers/:id/location', updateDriverLocation);
 
 // Routes
 router.get('/routes', getAllRoutes);

@@ -1,23 +1,49 @@
 // components/routes.ts
-import { getRoutes, getDrivers, getDeliveries, optimizeRoute, updateRoute, deleteRoute } from '../api.js';
-import { badge, driverAvatar, scoreBar, loading, showToast, confirm, openModal, closeModal } from '../utils/ui.js';
-import type { Route, Driver, Delivery } from '../types/index.js';
+import type { Map as MapboxMap, Marker as MapboxMarker } from 'mapbox-gl';
+import { getRoutes, getConfig, optimizeRoute, updateRoute, deleteRoute } from '../api.js';
+import { badge, driverAvatar, scoreBar, showToast, confirm, openModal, closeModal } from '../utils/ui.js';
+import type {
+  Route, Driver, Delivery,
+  WsRouteStarted, WsRouteCompleted, WsStopCompleted, WsDriverLocation,
+} from '../types/index.js';
 
+// ── Status color taxonomy for Mapbox markers ──────────────────────────────────
+const STATUS_COLOR: Record<string, string> = {
+  PENDING_DISPATCH: '#6b7280',  // grey
+  ROUTE_OPTIMIZED:  '#f59e0b',  // amber
+  IN_TRANSIT:       '#3b82f6',  // blue
+  DELIVERED:        '#22c55e',  // green
+  FAILED_ATTEMPT:   '#ef4444',  // red
+};
+const DEPOT_COORDS: [number, number] = [77.209, 28.6139]; // [lng, lat]
+
+// ── Module state ─────────────────────────────────────────────────────────────
 let allRoutes: Route[] = [];
+let mapInstance: MapboxMap | null = null;
+/** driver._id  ->  mapboxgl.Marker for real-time tracking */
+const driverMarkers = new Map<string, MapboxMarker>();
+/** routeId -> mapboxgl source/layer ids that were added */
+const routeLayers = new Set<string>();
+/** socket connection (singleton per page) */
+let socket: ReturnType<typeof io> | null = null;
 
+// ── Entry point ───────────────────────────────────────────────────────────────
 export async function renderRoutes(container: HTMLElement): Promise<void> {
   container.innerHTML = `
     <div class="page-header">
       <div class="page-header-left">
         <div class="page-eyebrow">Route Planner</div>
         <h1 class="page-title">Routes</h1>
-        <p class="page-subtitle">Plan, optimize and manage delivery routes</p>
+        <p class="page-subtitle">VRP-optimized multi-vehicle delivery routes</p>
       </div>
       <button class="btn btn-primary" id="new-route-btn">
         <svg fill="none" stroke="currentColor" stroke-width="2.5" viewBox="0 0 24 24"><polyline points="22 12 18 12 15 21 9 3 6 12 2 12"/></svg>
-        Plan New Route
+        Run VRP Optimization
       </button>
     </div>
+
+    <!-- Live map -->
+    <div id="route-map" style="width:100%;height:420px;border-radius:var(--radius-lg);overflow:hidden;margin-bottom:20px;background:var(--bg-elevated);border:1px solid var(--border)"></div>
 
     <div class="table-container">
       <div class="table-toolbar">
@@ -36,11 +62,11 @@ export async function renderRoutes(container: HTMLElement): Promise<void> {
     <!-- Route Detail Panel -->
     <div id="route-detail-panel" style="display:none;margin-top:16px"></div>
 
-    <!-- Plan Route Modal -->
+    <!-- VRP Modal -->
     <div class="modal-overlay" id="plan-route-modal">
-      <div class="modal" style="max-width:620px">
+      <div class="modal" style="max-width:480px">
         <div class="modal-header">
-          <span class="modal-title">Plan & Optimize Route</span>
+          <span class="modal-title">Run VRP Optimization</span>
           <button class="btn btn-ghost btn-icon" id="close-plan-modal">
             <svg fill="none" stroke="currentColor" stroke-width="2" viewBox="0 0 24 24"><line x1="18" y1="6" x2="6" y2="18"/><line x1="6" y1="6" x2="18" y2="18"/></svg>
           </button>
@@ -51,9 +77,190 @@ export async function renderRoutes(container: HTMLElement): Promise<void> {
   `;
 
   await loadRoutes();
+  await initMap(container);
+  initSocket();
   bindRouteEvents(container);
 }
 
+// ── Map initialisation ────────────────────────────────────────────────────────
+async function initMap(container: HTMLElement): Promise<void> {
+  const mapDiv = container.querySelector('#route-map') as HTMLElement;
+  if (!mapDiv) return;
+
+  let token = '';
+  try {
+    const cfg = await getConfig();
+    token = cfg.mapboxToken;
+  } catch {
+    mapDiv.innerHTML = `<p style="color:var(--text-muted);padding:24px;text-align:center">Map unavailable — MAPBOX_ACCESS_TOKEN not configured.</p>`;
+    return;
+  }
+
+  if (!token) {
+    mapDiv.innerHTML = `<p style="color:var(--text-muted);padding:24px;text-align:center">Map unavailable — MAPBOX_ACCESS_TOKEN not configured.</p>`;
+    return;
+  }
+
+  mapboxgl.accessToken = token;
+
+  mapInstance = new mapboxgl.Map({
+    container: mapDiv,
+    style: 'mapbox://styles/mapbox/dark-v11',
+    center: DEPOT_COORDS,
+    zoom: 11,
+  });
+
+  mapInstance.addControl(new mapboxgl.NavigationControl(), 'top-right');
+
+  mapInstance.on('load', () => {
+    // Depot marker
+    new mapboxgl.Marker({ color: '#f59e0b', scale: 1.2 })
+      .setLngLat(DEPOT_COORDS)
+      .setPopup(new mapboxgl.Popup({ offset: 20 }).setText('Depot — Delivery Center HQ'))
+      .addTo(mapInstance!);
+
+    // Render all current routes
+    allRoutes.forEach(plotRoute);
+  });
+}
+
+// ── Plot a route on the map ───────────────────────────────────────────────────
+function plotRoute(route: Route): void {
+  if (!mapInstance || !mapInstance.loaded()) return;
+
+  // Route polyline
+  if (route.routeGeometry?.coordinates.length) {
+    const srcId = `route-line-${route._id}`;
+    if (!mapInstance.getSource(srcId)) {
+      mapInstance.addSource(srcId, {
+        type: 'geojson',
+        data: {
+          type: 'Feature',
+          properties: { routeId: route.routeId, status: route.status },
+          geometry: route.routeGeometry,
+        },
+      });
+      mapInstance.addLayer({
+        id: srcId,
+        type: 'line',
+        source: srcId,
+        layout: { 'line-join': 'round', 'line-cap': 'round' },
+        paint: {
+          'line-color': route.status === 'active' ? '#3b82f6' : '#f59e0b',
+          'line-width': route.status === 'active' ? 4 : 2,
+          'line-opacity': 0.85,
+          'line-dasharray': route.status === 'planned' ? [2, 2] : [1],
+        },
+      });
+      routeLayers.add(srcId);
+    }
+  }
+
+  // Delivery stop markers
+  route.stops.forEach((stop) => {
+    const delivery = stop.delivery as Delivery;
+    if (!delivery?.location?.coordinates) return;
+    const [lng, lat] = delivery.location.coordinates;
+    const color = STATUS_COLOR[delivery.status] ?? '#6b7280';
+
+    // Small circle element for the marker
+    const el = document.createElement('div');
+    el.className = 'map-stop-marker';
+    el.style.cssText = `
+      width:22px;height:22px;border-radius:50%;
+      background:${color};border:2px solid #fff;
+      display:flex;align-items:center;justify-content:center;
+      font-size:10px;font-weight:700;color:#fff;cursor:pointer;
+    `;
+    el.textContent = String(stop.sequence);
+
+    new mapboxgl.Marker({ element: el })
+      .setLngLat([lng, lat])
+      .setPopup(
+        new mapboxgl.Popup({ offset: 14 }).setHTML(
+          `<strong>${delivery.customerName ?? ''}</strong><br>${delivery.address ?? ''}<br>
+           <span style="color:${color}">${delivery.status}</span>`
+        )
+      )
+      .addTo(mapInstance!);
+  });
+}
+
+// ── Update an existing route line color when status changes ───────────────────
+function updateRouteLineStyle(routeId: string, newStatus: string): void {
+  if (!mapInstance) return;
+  const srcId = `route-line-${routeId}`;
+  if (!mapInstance.getLayer(srcId)) return;
+  mapInstance.setPaintProperty(
+    srcId,
+    'line-color',
+    newStatus === 'active' ? '#3b82f6' : newStatus === 'completed' ? '#22c55e' : '#f59e0b'
+  );
+  mapInstance.setPaintProperty(srcId, 'line-width', newStatus === 'active' ? 4 : 2);
+}
+
+// ── Socket.io client ──────────────────────────────────────────────────────────
+function initSocket(): void {
+  if (socket) return; // already connected
+
+  try {
+    socket = io(); // connects to same origin via Socket.io CDN bundle
+
+    socket.on('connect', () => {
+      const el = document.getElementById('ws-status');
+      if (el) { el.textContent = '● LIVE'; el.style.color = '#22c55e'; }
+    });
+
+    socket.on('disconnect', () => {
+      const el = document.getElementById('ws-status');
+      if (el) { el.textContent = '● OFFLINE'; el.style.color = '#ef4444'; }
+    });
+
+    socket.on('route:started', (payload: WsRouteStarted) => {
+      showToast(`Route ${payload.routeId} is now IN TRANSIT`, 'success');
+      updateRouteLineStyle(payload.routeId, 'active');
+      loadRoutes();
+    });
+
+    socket.on('route:completed', (payload: WsRouteCompleted) => {
+      showToast(`Route ${payload.routeId} completed`, 'success');
+      updateRouteLineStyle(payload.routeId, 'completed');
+      loadRoutes();
+    });
+
+    socket.on('stop:completed', (_payload: WsStopCompleted) => {
+      loadRoutes(); // refresh table; marker color update on next plotRoute
+    });
+
+    socket.on('driver:location', (payload: WsDriverLocation) => {
+      if (!mapInstance) return;
+      const existing = driverMarkers.get(payload.driverId);
+      if (existing) {
+        existing.setLngLat(payload.coordinates);
+      } else {
+        const el = document.createElement('div');
+        el.style.cssText = `
+          width:28px;height:28px;border-radius:50%;
+          background:#f59e0b;border:3px solid #fff;
+          box-shadow:0 2px 8px rgba(0,0,0,.5);cursor:pointer;
+        `;
+        const marker = new mapboxgl.Marker({ element: el })
+          .setLngLat(payload.coordinates)
+          .setPopup(
+            new mapboxgl.Popup({ offset: 16 }).setHTML(
+              `<strong>Driver</strong><br>${payload.address ?? payload.coordinates.join(', ')}`
+            )
+          )
+          .addTo(mapInstance!);
+        driverMarkers.set(payload.driverId, marker);
+      }
+    });
+  } catch (err) {
+    console.warn('[Socket] Could not connect:', err);
+  }
+}
+
+// ── Data loading & table rendering ───────────────────────────────────────────
 async function loadRoutes(statusFilter?: string): Promise<void> {
   const tableDiv = document.getElementById('routes-table')!;
   tableDiv.innerHTML = `<div class="loading-overlay"><div class="spinner"></div></div>`;
@@ -63,6 +270,10 @@ async function loadRoutes(statusFilter?: string): Promise<void> {
     const res = await getRoutes(params);
     allRoutes = res.data;
     renderRouteTable(allRoutes);
+    // Replot routes on map after data refresh
+    if (mapInstance?.loaded()) {
+      allRoutes.forEach(plotRoute);
+    }
   } catch {
     showToast('Failed to load routes', 'error');
     tableDiv.innerHTML = `<p style="color:var(--red);padding:24px">Failed to load routes</p>`;
@@ -75,7 +286,7 @@ function renderRouteTable(routes: Route[]): void {
     tableDiv.innerHTML = `<div class="empty-state">
       <svg fill="none" stroke="currentColor" stroke-width="1.5" viewBox="0 0 24 24"><polyline points="22 12 18 12 15 21 9 3 6 12 2 12"/></svg>
       <h3>No routes yet</h3>
-      <p>Click "Plan New Route" to create an optimized delivery route.</p>
+      <p>Click "Run VRP Optimization" to auto-assign pending deliveries.</p>
     </div>`;
     return;
   }
@@ -103,7 +314,7 @@ function renderRouteTable(routes: Route[]): void {
             <div class="driver-cell">
               ${driverAvatar(driver?.name || '??')}
               <div>
-                <div style="font-weight:500">${driver?.name || '—'}</div>
+                <div style="font-weight:500">${driver?.name || '-'}</div>
                 <div style="font-size:0.72rem;color:var(--text-muted)">${driver?.vehicleType || ''}</div>
               </div>
             </div>
@@ -130,8 +341,9 @@ function renderRouteTable(routes: Route[]): void {
   </table>`;
 }
 
+// ── Event binding ─────────────────────────────────────────────────────────────
 function bindRouteEvents(container: HTMLElement): void {
-  container.querySelector('#new-route-btn')?.addEventListener('click', () => openPlanRouteModal());
+  container.querySelector('#new-route-btn')?.addEventListener('click', () => openVrpModal());
   container.querySelector('#close-plan-modal')?.addEventListener('click', () => closeModal('plan-route-modal'));
 
   container.querySelector('.table-toolbar')?.addEventListener('click', (e) => {
@@ -144,10 +356,10 @@ function bindRouteEvents(container: HTMLElement): void {
 
   container.addEventListener('click', async (e) => {
     const target = e.target as HTMLElement;
-    const viewBtn    = target.closest('.view-route-btn') as HTMLElement;
-    const startBtn   = target.closest('.start-route-btn') as HTMLElement;
-    const completeBtn= target.closest('.complete-route-btn') as HTMLElement;
-    const deleteBtn  = target.closest('.delete-route-btn') as HTMLElement;
+    const viewBtn     = target.closest('.view-route-btn') as HTMLElement;
+    const startBtn    = target.closest('.start-route-btn') as HTMLElement;
+    const completeBtn = target.closest('.complete-route-btn') as HTMLElement;
+    const deleteBtn   = target.closest('.delete-route-btn') as HTMLElement;
 
     if (viewBtn)     showRouteDetail(viewBtn.dataset.id!);
     if (startBtn)    await changeRouteStatus(startBtn.dataset.id!, 'active');
@@ -173,6 +385,7 @@ async function changeRouteStatus(id: string, status: string): Promise<void> {
   } catch { showToast('Status update failed', 'error'); }
 }
 
+// ── Route detail panel ────────────────────────────────────────────────────────
 async function showRouteDetail(id: string): Promise<void> {
   const panel = document.getElementById('route-detail-panel')!;
   panel.style.display = 'block';
@@ -192,13 +405,13 @@ async function showRouteDetail(id: string): Promise<void> {
             <div style="font-family:var(--font-mono);font-size:0.7rem;color:var(--amber)">${r.routeId}</div>
             <div style="font-size:1.1rem;font-weight:600;margin-top:2px">Route Detail</div>
           </div>
-          <button class="btn btn-ghost btn-sm" id="close-detail">✕ Close</button>
+          <button class="btn btn-ghost btn-sm" id="close-detail">Close</button>
         </div>
 
         <div style="display:grid;grid-template-columns:1fr 1fr 1fr 1fr;gap:12px;margin-bottom:20px;padding:16px;background:var(--bg-elevated);border-radius:var(--radius-md)">
           <div>
             <div style="font-size:0.7rem;color:var(--text-muted);margin-bottom:2px">Driver</div>
-            <div class="driver-cell">${driverAvatar(driver?.name || '??')}<span style="font-weight:500">${driver?.name || '—'}</span></div>
+            <div class="driver-cell">${driverAvatar(driver?.name || '??')}<span style="font-weight:500">${driver?.name || '-'}</span></div>
           </div>
           <div>
             <div style="font-size:0.7rem;color:var(--text-muted);margin-bottom:2px">Status</div>
@@ -218,7 +431,6 @@ async function showRouteDetail(id: string): Promise<void> {
           <div>
             <div style="font-family:var(--font-mono);font-size:0.68rem;color:var(--text-muted);letter-spacing:0.1em;text-transform:uppercase;margin-bottom:12px">Route Stops (${r.stops.length})</div>
             <div class="route-timeline">
-              <!-- Depot Start -->
               <div class="route-stop">
                 <div class="stop-connector">
                   <div class="stop-dot depot">D</div>
@@ -246,7 +458,7 @@ async function showRouteDetail(id: string): Promise<void> {
                       <span class="stop-time">${stop.estimatedArrival}</span>
                       ${badge(stop.status)}
                     </div>
-                    <div class="stop-address">${del?.address || '—'}</div>
+                    <div class="stop-address">${del?.address || '-'}</div>
                     <div class="stop-meta">
                       <span>+${stop.distanceFromPrev} km</span>
                       ${del?.priority ? `<span>${badge(del.priority)}</span>` : ''}
@@ -255,7 +467,6 @@ async function showRouteDetail(id: string): Promise<void> {
                   </div>
                 </div>`;
               }).join('')}
-              <!-- Return to Depot -->
               <div class="route-stop">
                 <div class="stop-connector">
                   <div class="stop-dot depot">D</div>
@@ -299,121 +510,54 @@ async function showRouteDetail(id: string): Promise<void> {
   }
 }
 
-async function openPlanRouteModal(): Promise<void> {
+// ── VRP optimization modal ────────────────────────────────────────────────────
+function openVrpModal(): void {
   const body = document.getElementById('plan-modal-body')!;
-  body.innerHTML = `<div class="loading-overlay"><div class="spinner"></div></div>`;
+  body.innerHTML = `
+    <div class="form-group">
+      <label class="form-label">Planned Date</label>
+      <input class="form-input" type="date" id="pm-date" value="${new Date().toISOString().split('T')[0]}">
+    </div>
+    <div class="form-group">
+      <label class="form-label">Notes</label>
+      <input class="form-input" id="pm-notes" placeholder="Optional route notes...">
+    </div>
+    <div style="background:var(--amber-glow);border:1px solid rgba(245,158,11,0.3);border-radius:var(--radius-md);padding:12px;font-size:0.8rem;color:var(--amber);margin-bottom:4px">
+      The Mapbox Optimization API v1 will be called for each available driver.
+      All <strong>PENDING_DISPATCH</strong> deliveries are automatically assigned
+      using capacity-aware bin-packing, then routed per vehicle.
+    </div>
+    <div class="modal-footer">
+      <button class="btn btn-secondary" id="cancel-plan">Cancel</button>
+      <button class="btn btn-primary" id="run-optimize-btn">
+        <svg fill="none" stroke="currentColor" stroke-width="2" viewBox="0 0 24 24"><polyline points="22 12 18 12 15 21 9 3 6 12 2 12"/></svg>
+        Run VRP Optimization
+      </button>
+    </div>
+  `;
+
   openModal('plan-route-modal');
 
-  try {
-    const [driversRes, deliveriesRes] = await Promise.all([
-      getDrivers({ status: 'available' }),
-      getDeliveries({ status: 'pending' }),
-    ]);
+  document.getElementById('cancel-plan')?.addEventListener('click', () => closeModal('plan-route-modal'));
 
-    const drivers = driversRes.data;
-    const deliveries = deliveriesRes.data;
+  document.getElementById('run-optimize-btn')?.addEventListener('click', async () => {
+    const plannedDate = (document.getElementById('pm-date') as HTMLInputElement).value;
+    const notes       = (document.getElementById('pm-notes') as HTMLInputElement).value;
 
-    if (!drivers.length) {
-      body.innerHTML = `<p style="color:var(--red);padding:16px">No available drivers. All drivers are busy or off duty.</p>`;
-      return;
+    const btn = document.getElementById('run-optimize-btn')!;
+    btn.innerHTML = '<div class="spinner" style="width:16px;height:16px;border-width:2px"></div> Optimizing...';
+    btn.setAttribute('disabled', 'true');
+
+    try {
+      const result = await optimizeRoute({ plannedDate, notes });
+      const count = Array.isArray(result.data) ? result.data.length : 1;
+      showToast(`VRP complete — ${count} route${count !== 1 ? 's' : ''} created`, 'success');
+      closeModal('plan-route-modal');
+      await loadRoutes();
+    } catch (err: unknown) {
+      showToast((err as Error).message || 'Optimization failed', 'error');
+      btn.innerHTML = 'Run VRP Optimization';
+      btn.removeAttribute('disabled');
     }
-    if (!deliveries.length) {
-      body.innerHTML = `<p style="color:var(--amber);padding:16px">No pending deliveries to assign.</p>`;
-      return;
-    }
-
-    body.innerHTML = `
-      <div class="form-group">
-        <label class="form-label">Select Driver *</label>
-        <select class="form-select" id="pm-driver">
-          <option value="">— Choose available driver —</option>
-          ${drivers.map(d => `<option value="${d._id}" data-cap="${d.capacityKg}">${d.name} · ${d.vehicleType} · ${d.capacityKg}kg cap</option>`).join('')}
-        </select>
-      </div>
-      <div class="form-group">
-        <label class="form-label">Planned Date</label>
-        <input class="form-input" type="date" id="pm-date" value="${new Date().toISOString().split('T')[0]}">
-      </div>
-      <div class="form-group">
-        <div style="display:flex;align-items:center;justify-content:space-between;margin-bottom:8px">
-          <label class="form-label" style="margin:0">Select Deliveries * <span id="sel-count" style="color:var(--amber)">(0 selected)</span></label>
-          <div style="font-family:var(--font-mono);font-size:0.7rem;color:var(--text-muted)">Total: <span id="total-weight">0</span> kg / <span id="cap-limit">—</span> kg</div>
-        </div>
-        <div style="max-height:260px;overflow-y:auto;border:1px solid var(--border);border-radius:var(--radius-md);background:var(--bg-elevated)">
-          ${deliveries.map(d => `
-            <label style="display:flex;align-items:center;gap:10px;padding:10px 12px;cursor:pointer;border-bottom:1px solid var(--border);transition:background 0.1s" class="delivery-row-label">
-              <input type="checkbox" class="del-checkbox" data-id="${d._id}" data-weight="${d.weightKg}" style="accent-color:var(--amber)">
-              <div style="flex:1">
-                <div style="display:flex;align-items:center;gap:6px">
-                  <span style="font-weight:500">${d.customerName}</span>
-                  ${badge(d.priority)}
-                  <span style="font-family:var(--font-mono);font-size:0.7rem;color:var(--text-muted)">${d.orderId}</span>
-                </div>
-                <div style="font-size:0.78rem;color:var(--text-muted);margin-top:2px">${d.address}</div>
-              </div>
-              <span style="font-family:var(--font-mono);font-size:0.78rem;color:var(--text-secondary)">${d.weightKg}kg</span>
-            </label>`).join('')}
-        </div>
-      </div>
-      <div class="form-group">
-        <label class="form-label">Notes</label>
-        <input class="form-input" id="pm-notes" placeholder="Optional route notes…">
-      </div>
-      <div style="background:var(--amber-glow);border:1px solid rgba(245,158,11,0.3);border-radius:var(--radius-md);padding:12px;font-size:0.8rem;color:var(--amber);margin-bottom:4px">
-        ⚡ The optimizer uses a nearest-neighbor algorithm with priority weighting to minimize total distance.
-      </div>
-      <div class="modal-footer">
-        <button class="btn btn-secondary" id="cancel-plan">Cancel</button>
-        <button class="btn btn-primary" id="run-optimize-btn">
-          <svg fill="none" stroke="currentColor" stroke-width="2" viewBox="0 0 24 24"><polyline points="22 12 18 12 15 21 9 3 6 12 2 12"/></svg>
-          Optimize & Create Route
-        </button>
-      </div>
-    `;
-
-    // Weight tracker
-    const updateWeightDisplay = () => {
-      const checkboxes = document.querySelectorAll<HTMLInputElement>('.del-checkbox:checked');
-      const total = Array.from(checkboxes).reduce((s, c) => s + parseFloat(c.dataset.weight!), 0);
-      document.getElementById('sel-count')!.textContent = `(${checkboxes.length} selected)`;
-      document.getElementById('total-weight')!.textContent = total.toFixed(1);
-    };
-
-    document.getElementById('pm-driver')?.addEventListener('change', (e) => {
-      const sel = (e.target as HTMLSelectElement).selectedOptions[0];
-      document.getElementById('cap-limit')!.textContent = sel?.dataset.cap || '—';
-    });
-
-    body.querySelectorAll('.del-checkbox').forEach(cb => cb.addEventListener('change', updateWeightDisplay));
-
-    document.getElementById('cancel-plan')?.addEventListener('click', () => closeModal('plan-route-modal'));
-
-    document.getElementById('run-optimize-btn')?.addEventListener('click', async () => {
-      const driverId = (document.getElementById('pm-driver') as HTMLSelectElement).value;
-      const plannedDate = (document.getElementById('pm-date') as HTMLInputElement).value;
-      const notes = (document.getElementById('pm-notes') as HTMLInputElement).value;
-      const deliveryIds = Array.from(document.querySelectorAll<HTMLInputElement>('.del-checkbox:checked')).map(c => c.dataset.id!);
-
-      if (!driverId) { showToast('Please select a driver', 'error'); return; }
-      if (!deliveryIds.length) { showToast('Select at least one delivery', 'error'); return; }
-
-      const btn = document.getElementById('run-optimize-btn')!;
-      btn.innerHTML = '<div class="spinner" style="width:16px;height:16px;border-width:2px"></div> Optimizing…';
-      btn.setAttribute('disabled', 'true');
-
-      try {
-        await optimizeRoute({ driverId, deliveryIds, plannedDate, notes });
-        showToast('Route optimized and created!', 'success');
-        closeModal('plan-route-modal');
-        loadRoutes();
-      } catch (err: unknown) {
-        showToast((err as Error).message || 'Optimization failed', 'error');
-        btn.innerHTML = '⚡ Optimize & Create Route';
-        btn.removeAttribute('disabled');
-      }
-    });
-  } catch {
-    showToast('Failed to load data for route planning', 'error');
-    body.innerHTML = `<p style="color:var(--red);padding:16px">Failed to load drivers or deliveries.</p>`;
-  }
+  });
 }

@@ -13,11 +13,15 @@ async function request<T>(url: string, options?: RequestInit): Promise<T> {
   return json;
 }
 
-// ── Dashboard ────────────────────────────────────────────────
+// -- Config -------------------------------------------------------------------
+export const getConfig = () =>
+  request<{ mapboxToken: string }>('/config');
+
+// -- Dashboard ----------------------------------------------------------------
 export const getDashboard = () =>
   request<ApiResponse<DashboardStats>>('/dashboard');
 
-// ── Deliveries ───────────────────────────────────────────────
+// -- Deliveries ---------------------------------------------------------------
 export const getDeliveries = (params?: Record<string, string>) => {
   const qs = params ? '?' + new URLSearchParams(params).toString() : '';
   return request<ApiResponse<Delivery[]>>(`/deliveries${qs}`);
@@ -33,7 +37,7 @@ export const deleteDelivery = (id: string) =>
 export const getDeliveryStats = () =>
   request<ApiResponse<unknown>>('/deliveries/stats');
 
-// ── Drivers ──────────────────────────────────────────────────
+// -- Drivers ------------------------------------------------------------------
 export const getDrivers = (params?: Record<string, string>) => {
   const qs = params ? '?' + new URLSearchParams(params).toString() : '';
   return request<ApiResponse<Driver[]>>(`/drivers${qs}`);
@@ -46,16 +50,23 @@ export const updateDriver = (id: string, body: Partial<Driver>) =>
   request<ApiResponse<Driver>>(`/drivers/${id}`, { method: 'PUT', body: JSON.stringify(body) });
 export const deleteDriver = (id: string) =>
   request<ApiResponse<null>>(`/drivers/${id}`, { method: 'DELETE' });
+/** Push a GPS coordinate update for a driver (triggers driver:location WS event) */
+export const updateDriverLocation = (id: string, lng: number, lat: number, address?: string) =>
+  request<ApiResponse<Driver>>(`/drivers/${id}/location`, {
+    method: 'PUT',
+    body: JSON.stringify({ lng, lat, address }),
+  });
 
-// ── Routes ───────────────────────────────────────────────────
+// -- Routes -------------------------------------------------------------------
 export const getRoutes = (params?: Record<string, string>) => {
   const qs = params ? '?' + new URLSearchParams(params).toString() : '';
   return request<ApiResponse<Route[]>>(`/routes${qs}`);
 };
 export const getRoute = (id: string) =>
   request<ApiResponse<Route>>(`/routes/${id}`);
-export const optimizeRoute = (body: { driverId: string; deliveryIds: string[]; plannedDate?: string; notes?: string }) =>
-  request<ApiResponse<Route>>('/routes/optimize', { method: 'POST', body: JSON.stringify(body) });
+/** Triggers full auto-VRP across all PENDING_DISPATCH deliveries + available drivers */
+export const optimizeRoute = (body: { plannedDate?: string; notes?: string } = {}) =>
+  request<ApiResponse<Route[]>>('/routes/optimize', { method: 'POST', body: JSON.stringify(body) });
 export const updateRoute = (id: string, body: Record<string, unknown>) =>
   request<ApiResponse<Route>>(`/routes/${id}`, { method: 'PUT', body: JSON.stringify(body) });
 export const deleteRoute = (id: string) =>

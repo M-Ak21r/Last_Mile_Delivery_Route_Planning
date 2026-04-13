@@ -12,8 +12,8 @@ export interface IDriver extends Document {
   capacityKg: number;
   status: DriverStatus;
   currentLocation: {
-    lat: number;
-    lng: number;
+    type: 'Point';
+    coordinates: [number, number]; // [lng, lat]
     address: string;
   };
   totalDeliveries: number;
@@ -40,8 +40,15 @@ const DriverSchema = new Schema<IDriver>(
       default: 'available',
     },
     currentLocation: {
-      lat: { type: Number, default: 28.6139 },
-      lng: { type: Number, default: 77.209 },
+      type: {
+        type: String,
+        enum: ['Point'],
+        default: 'Point',
+      },
+      coordinates: {
+        type: [Number],
+        default: [77.209, 28.6139], // [lng, lat] — Delivery Center HQ, New Delhi
+      },
       address: { type: String, default: 'Delivery Center HQ' },
     },
     totalDeliveries: { type: Number, default: 0 },
@@ -49,5 +56,8 @@ const DriverSchema = new Schema<IDriver>(
   },
   { timestamps: true }
 );
+
+// 2dsphere index enables geo queries on driver position
+DriverSchema.index({ currentLocation: '2dsphere' });
 
 export default mongoose.model<IDriver>('Driver', DriverSchema);

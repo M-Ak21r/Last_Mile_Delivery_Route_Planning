@@ -1,22 +1,32 @@
 import mongoose, { Document, Schema } from 'mongoose';
 
+// ── State Machine ────────────────────────────────────────────────────────────
+// PENDING_DISPATCH  → delivery created, awaiting VRP assignment
+// ROUTE_OPTIMIZED   → included in a planned route
+// IN_TRANSIT        → driver has started the route
+// DELIVERED         → successfully handed off to customer
+// FAILED_ATTEMPT    → delivery attempted but failed; eligible for retry
 export type DeliveryStatus =
-  | 'pending'
-  | 'assigned'
-  | 'picked_up'
-  | 'in_transit'
-  | 'delivered'
-  | 'failed'
-  | 'returned';
+  | 'PENDING_DISPATCH'
+  | 'ROUTE_OPTIMIZED'
+  | 'IN_TRANSIT'
+  | 'DELIVERED'
+  | 'FAILED_ATTEMPT';
 
 export type Priority = 'low' | 'medium' | 'high' | 'urgent';
+
+// GeoJSON Point as stored in MongoDB (coordinates: [lng, lat])
+export interface IGeoPoint {
+  type: 'Point';
+  coordinates: [number, number]; // [longitude, latitude]
+}
 
 export interface IDelivery extends Document {
   orderId: string;
   customerName: string;
   customerPhone: string;
   address: string;
-  coordinates: { lat: number; lng: number };
+  location: IGeoPoint;
   weightKg: number;
   dimensions: { length: number; width: number; height: number };
   priority: Priority;
@@ -32,16 +42,21 @@ export interface IDelivery extends Document {
   updatedAt: Date;
 }
 
+const GeoPointSchema = new Schema(
+  {
+    type: { type: String, enum: ['Point'], required: true, default: 'Point' },
+    coordinates: { type: [Number], required: true }, // [lng, lat]
+  },
+  { _id: false }
+);
+
 const DeliverySchema = new Schema<IDelivery>(
   {
     orderId: { type: String, required: true, unique: true },
     customerName: { type: String, required: true },
     customerPhone: { type: String, required: true },
     address: { type: String, required: true },
-    coordinates: {
-      lat: { type: Number, required: true },
-      lng: { type: Number, required: true },
-    },
+    location: { type: GeoPointSchema, required: true },
     weightKg: { type: Number, required: true, min: 0.1 },
     dimensions: {
       length: { type: Number, default: 30 },
@@ -55,8 +70,8 @@ const DeliverySchema = new Schema<IDelivery>(
     },
     status: {
       type: String,
-      enum: ['pending', 'assigned', 'picked_up', 'in_transit', 'delivered', 'failed', 'returned'],
-      default: 'pending',
+      enum: ['PENDING_DISPATCH', 'ROUTE_OPTIMIZED', 'IN_TRANSIT', 'DELIVERED', 'FAILED_ATTEMPT'],
+      default: 'PENDING_DISPATCH',
     },
     deliveryWindow: {
       start: { type: String, default: '09:00' },
@@ -71,5 +86,8 @@ const DeliverySchema = new Schema<IDelivery>(
   },
   { timestamps: true }
 );
+
+// 2dsphere index enables geo queries on delivery locations
+DeliverySchema.index({ location: '2dsphere' });
 
 export default mongoose.model<IDelivery>('Delivery', DeliverySchema);

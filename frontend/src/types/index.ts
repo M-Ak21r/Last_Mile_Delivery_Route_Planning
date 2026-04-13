@@ -1,18 +1,39 @@
-// types.ts — shared types for the frontend
+// types/index.ts — shared strict TypeScript interfaces for the frontend
 
-export type DeliveryStatus = 'pending' | 'assigned' | 'picked_up' | 'in_transit' | 'delivered' | 'failed' | 'returned';
+// ── State Machine ─────────────────────────────────────────────────────────────
+/** Delivery lifecycle enforced by the VRP orchestration layer */
+export type DeliveryStatus =
+  | 'PENDING_DISPATCH'
+  | 'ROUTE_OPTIMIZED'
+  | 'IN_TRANSIT'
+  | 'DELIVERED'
+  | 'FAILED_ATTEMPT';
+
 export type Priority = 'low' | 'medium' | 'high' | 'urgent';
 export type VehicleType = 'bike' | 'scooter' | 'van' | 'truck';
 export type DriverStatus = 'available' | 'on_route' | 'off_duty' | 'break';
 export type RouteStatus = 'planned' | 'active' | 'completed' | 'cancelled';
 
+// ── GeoJSON ───────────────────────────────────────────────────────────────────
+export interface GeoPoint {
+  type: 'Point';
+  coordinates: [number, number]; // [longitude, latitude]
+}
+
+export interface GeoLineString {
+  type: 'LineString';
+  coordinates: [number, number][]; // array of [lng, lat]
+}
+
+// ── Domain Models ─────────────────────────────────────────────────────────────
 export interface Delivery {
   _id: string;
   orderId: string;
   customerName: string;
   customerPhone: string;
   address: string;
-  coordinates: { lat: number; lng: number };
+  /** GeoJSON Point — coordinates are [lng, lat] */
+  location: GeoPoint;
   weightKg: number;
   dimensions: { length: number; width: number; height: number };
   priority: Priority;
@@ -37,7 +58,8 @@ export interface Driver {
   vehicleNumber: string;
   capacityKg: number;
   status: DriverStatus;
-  currentLocation: { lat: number; lng: number; address: string };
+  /** GeoJSON Point for driver's current position */
+  currentLocation: GeoPoint & { address: string };
   totalDeliveries: number;
   rating: number;
   createdAt: string;
@@ -61,8 +83,10 @@ export interface Route {
   totalDistanceKm: number;
   estimatedDurationMin: number;
   actualDurationMin?: number;
-  startLocation: { lat: number; lng: number; address: string };
-  endLocation: { lat: number; lng: number; address: string };
+  startLocation: GeoPoint & { address: string };
+  endLocation: GeoPoint & { address: string };
+  /** Driving geometry returned by Mapbox Optimization API v1 */
+  routeGeometry?: GeoLineString;
   plannedDate: string;
   startedAt?: string;
   completedAt?: string;
@@ -89,3 +113,49 @@ export interface ApiResponse<T> {
   total?: number;
   message?: string;
 }
+
+// ── VRP Payload Shapes ────────────────────────────────────────────────────────
+/** Mapbox Optimization API v1 waypoint entry */
+export interface MapboxWaypoint {
+  waypoint_index: number;
+  trips_index: number;
+  location: [number, number];
+  name: string;
+}
+
+/** Mapbox Optimization API v1 trip entry */
+export interface MapboxTrip {
+  geometry: GeoLineString;
+  duration: number;
+  distance: number;
+  legs: { distance: number; duration: number }[];
+}
+
+// ── WebSocket Payload Interfaces ──────────────────────────────────────────────
+/** Emitted when a route transitions to IN_TRANSIT (active) */
+export interface WsRouteStarted {
+  routeId: string;
+  driverId: string;
+  stops: RouteStop[];
+}
+
+/** Emitted when a route is marked completed */
+export interface WsRouteCompleted {
+  routeId: string;
+  driverId: string;
+}
+
+/** Emitted when an individual delivery stop is completed */
+export interface WsStopCompleted {
+  routeId: string;
+  stopId: string;
+  deliveryId: string;
+}
+
+/** Emitted when a driver sends a GPS update */
+export interface WsDriverLocation {
+  driverId: string;
+  coordinates: [number, number]; // [lng, lat]
+  address?: string;
+}
+

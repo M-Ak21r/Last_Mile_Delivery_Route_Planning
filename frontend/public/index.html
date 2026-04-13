@@ -5,6 +5,11 @@
   <meta name="viewport" content="width=device-width, initial-scale=1.0">
   <title>LastMile — Delivery Route Planning</title>
   <link rel="stylesheet" href="/css/main.css">
+  <!-- Mapbox GL JS -->
+  <link href="https://api.mapbox.com/mapbox-gl-js/v3.3.0/mapbox-gl.css" rel="stylesheet">
+  <script src="https://api.mapbox.com/mapbox-gl-js/v3.3.0/mapbox-gl.js"></script>
+  <!-- Socket.io client (served by the Express/Socket.io backend) -->
+  <script src="/socket.io/socket.io.js"></script>
   <link rel="icon" href="data:image/svg+xml,<svg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 100 100'><text y='.9em' font-size='90'>🚐</text></svg>">
 </head>
 <body>
@@ -75,7 +80,7 @@
         <path d="M19.07 4.93a10 10 0 0 1 0 14.14M4.93 4.93a10 10 0 0 0 0 14.14"/>
       </svg>
       Live Tracking
-      <span style="font-size:0.6rem;color:var(--text-muted);margin-left:auto;background:var(--border);padding:1px 5px;border-radius:3px">SOON</span>
+      <span id="ws-status" style="font-size:0.6rem;margin-left:auto;background:var(--border);padding:1px 5px;border-radius:3px;color:var(--text-muted)">●&nbsp;CONNECTING</span>
     </div>
 
     <div class="nav-item" style="cursor:default;opacity:0.5">

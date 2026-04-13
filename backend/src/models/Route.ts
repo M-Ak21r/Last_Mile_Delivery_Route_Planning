@@ -2,6 +2,11 @@ import mongoose, { Document, Schema } from 'mongoose';
 
 export type RouteStatus = 'planned' | 'active' | 'completed' | 'cancelled';
 
+export interface IGeoPoint {
+  type: 'Point';
+  coordinates: [number, number]; // [longitude, latitude]
+}
+
 export interface IRouteStop {
   _id?: mongoose.Types.ObjectId;
   delivery: mongoose.Types.ObjectId;
@@ -19,8 +24,13 @@ export interface IRoute extends Document {
   totalDistanceKm: number;
   estimatedDurationMin: number;
   actualDurationMin?: number;
-  startLocation: { lat: number; lng: number; address: string };
-  endLocation: { lat: number; lng: number; address: string };
+  startLocation: IGeoPoint & { address: string };
+  endLocation: IGeoPoint & { address: string };
+  /** GeoJSON LineString geometry returned by Mapbox Optimization API v1 */
+  routeGeometry?: {
+    type: 'LineString';
+    coordinates: [number, number][];
+  };
   plannedDate: Date;
   startedAt?: Date;
   completedAt?: Date;
@@ -29,6 +39,14 @@ export interface IRoute extends Document {
   createdAt: Date;
   updatedAt: Date;
 }
+
+const GeoPointSchema = new Schema(
+  {
+    type: { type: String, enum: ['Point'], required: true, default: 'Point' },
+    coordinates: { type: [Number], required: true }, // [lng, lat]
+  },
+  { _id: false }
+);
 
 const RouteStopSchema = new Schema<IRouteStop>({
   delivery: { type: Schema.Types.ObjectId, ref: 'Delivery', required: true },
@@ -56,14 +74,22 @@ const RouteSchema = new Schema<IRoute>(
     estimatedDurationMin: { type: Number, default: 0 },
     actualDurationMin: { type: Number },
     startLocation: {
-      lat: { type: Number, required: true },
-      lng: { type: Number, required: true },
+      type: { type: String, enum: ['Point'], required: true, default: 'Point' },
+      coordinates: { type: [Number], required: true },
       address: { type: String, required: true },
     },
     endLocation: {
-      lat: { type: Number, required: true },
-      lng: { type: Number, required: true },
+      type: { type: String, enum: ['Point'], required: true, default: 'Point' },
+      coordinates: { type: [Number], required: true },
       address: { type: String, required: true },
+    },
+    routeGeometry: {
+      type: {
+        type: String,
+        enum: ['LineString'],
+        default: 'LineString',
+      },
+      coordinates: { type: [[Number]] },
     },
     plannedDate: { type: Date, required: true },
     startedAt: { type: Date },

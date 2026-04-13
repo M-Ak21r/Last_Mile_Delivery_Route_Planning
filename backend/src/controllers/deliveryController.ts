@@ -87,7 +87,7 @@ export const getDeliveryStats = async (_req: Request, res: Response) => {
     ]);
 
     const total = await Delivery.countDocuments();
-    const delivered = await Delivery.countDocuments({ status: 'delivered' });
+    const delivered = await Delivery.countDocuments({ status: 'DELIVERED' });
 
     res.json({
       success: true,

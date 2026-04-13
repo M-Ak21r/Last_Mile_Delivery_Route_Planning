@@ -1,6 +1,7 @@
 import { Request, Response } from 'express';
 import Driver from '../models/Driver';
 import Route from '../models/Route';
+import { getIo } from '../socket';
 
 export const getAllDrivers = async (req: Request, res: Response) => {
   try {
@@ -60,6 +61,50 @@ export const deleteDriver = async (req: Request, res: Response) => {
     const driver = await Driver.findByIdAndDelete(req.params.id);
     if (!driver) return res.status(404).json({ success: false, message: 'Driver not found' });
     res.json({ success: true, message: 'Driver deleted' });
+  } catch (err) {
+    res.status(500).json({ success: false, message: 'Server error', error: err });
+  }
+};
+
+/**
+ * PUT /api/drivers/:id/location
+ *
+ * Accepts { lng, lat, address? } from a driver's mobile GPS.
+ * Persists the GeoJSON Point and broadcasts a driver:location socket event
+ * so the frontend map can move the driver marker in real-time.
+ */
+export const updateDriverLocation = async (req: Request, res: Response) => {
+  try {
+    const { lng, lat, address } = req.body as { lng: number; lat: number; address?: string };
+
+    if (typeof lng !== 'number' || typeof lat !== 'number') {
+      return res.status(400).json({ success: false, message: 'lng and lat (numbers) are required' });
+    }
+
+    const update: Record<string, unknown> = {
+      'currentLocation.coordinates': [lng, lat],
+    };
+    if (address) update['currentLocation.address'] = address;
+
+    const driver = await Driver.findByIdAndUpdate(
+      req.params.id,
+      { $set: update },
+      { new: true, runValidators: true }
+    );
+    if (!driver) return res.status(404).json({ success: false, message: 'Driver not found' });
+
+    // Broadcast to all connected WebSocket clients
+    try {
+      getIo().emit('driver:location', {
+        driverId: (driver._id as { toString(): string }).toString(),
+        coordinates: [lng, lat] as [number, number],
+        address: driver.currentLocation.address,
+      });
+    } catch (socketErr) {
+      console.warn('[Socket] Could not emit driver:location:', socketErr);
+    }
+
+    res.json({ success: true, data: driver });
   } catch (err) {
     res.status(500).json({ success: false, message: 'Server error', error: err });
   }
