@@ -209,11 +209,11 @@ function openDeliveryForm(delivery) {
     <div class="form-row">
       <div class="form-group">
         <label class="form-label">Latitude *</label>
-        <input class="form-input" id="f-lat" type="number" step="0.0001" value="${delivery?.coordinates.lat || ''}" placeholder="28.6139">
+        <input class="form-input" id="f-lat" type="number" step="0.0001" value="${delivery?.location.coordinates[1] || ''}" placeholder="28.6139">
       </div>
       <div class="form-group">
         <label class="form-label">Longitude *</label>
-        <input class="form-input" id="f-lng" type="number" step="0.0001" value="${delivery?.coordinates.lng || ''}" placeholder="77.2090">
+        <input class="form-input" id="f-lng" type="number" step="0.0001" value="${delivery?.location.coordinates[0] || ''}" placeholder="77.2090">
       </div>
     </div>
     <div class="form-row">
@@ -236,7 +236,7 @@ function openDeliveryForm(delivery) {
       <div class="form-group">
         <label class="form-label">Status</label>
         <select class="form-select" id="f-status">
-          ${['pending', 'assigned', 'picked_up', 'in_transit', 'delivered', 'failed', 'returned'].map(s => `<option value="${s}" ${delivery?.status === s ? 'selected' : ''}>${s.replace('_', ' ')}</option>`).join('')}
+          ${['PENDING_DISPATCH', 'ROUTE_OPTIMIZED', 'IN_TRANSIT', 'DELIVERED', 'FAILED_ATTEMPT'].map(s => `<option value="${s}" ${delivery?.status === s ? 'selected' : ''}>${s.replace('_', ' ')}</option>`).join('')}
         </select>
       </div>
     </div>
@@ -266,9 +266,12 @@ function openDeliveryForm(delivery) {
             customerName: document.getElementById('f-name').value,
             customerPhone: document.getElementById('f-phone').value,
             address: document.getElementById('f-address').value,
-            coordinates: {
-                lat: parseFloat(document.getElementById('f-lat').value),
-                lng: parseFloat(document.getElementById('f-lng').value),
+            location: {
+                type: 'Point',
+                coordinates: [
+                    parseFloat(document.getElementById('f-lng').value),
+                    parseFloat(document.getElementById('f-lat').value),
+                ],
             },
             weightKg: parseFloat(document.getElementById('f-weight').value),
             codAmount: parseFloat(document.getElementById('f-cod').value) || 0,
