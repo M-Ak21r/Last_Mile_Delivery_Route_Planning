@@ -1,0 +1,13 @@
+{
+  "name": "lastmile-frontend",
+  "version": "1.0.0",
+  "description": "Last Mile Route Planning Frontend",
+  "scripts": {
+    "build": "tsc",
+    "watch": "tsc --watch",
+    "dev": "tsc && echo 'Frontend compiled'"
+  },
+  "devDependencies": {
+    "typescript": "^5.4.5"
+  }
+}
